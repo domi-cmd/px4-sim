@@ -1,3 +1,139 @@
+# Exercise Submission
+
+Link to repository: https://github.com/domi-cmd/px4-sim/
+
+## Problems
+I managed to finish neither of the two tasks completely. I have spent countless hours on trying to accomplish them this week, but am unable to do so due to what I think are hardware limitations.
+
+## Step by step set up of project
+1. Fork the repository: https://github.com/erdemuysalx/px4-sim
+2. Clone it locally on your remote device
+3. Navigate into the root of the project using a terminal capable of executing bash commands
+4. Build the project by running:
+```cmd
+./build.sh --all
+```
+5. Install docker desktop and start it using
+```cmd
+docker-compose up
+```
+
+## Task 1
+This task requires the creation (or download) of a gazebo environment and a ros2 node. 
+1. The following environment can simply be downloaded to avoid manual creation of one: https://app.gazebosim.org/VentuRobotics/fuel/models/baylands.
+2. Place the following code for the node in a new folder in the root directoy called "yolo_ws", call the node file "yolo_node.py":
+```py
+#!/usr/bin/env python3
+import rclpy, time
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+from ultralytics import YOLO
+import cv2
+
+class YoloNode(Node):
+    def __init__(self):
+        super().__init__('yolo_node')
+        self.model = YOLO('yolov8n.pt')
+        self.bridge = CvBridge()
+        self.pub = self.create_publisher(Image, '/yolo/image_annotated', 10)
+        self.create_subscription(Image, '/camera/image_raw', self.cb, 10)
+
+    def cb(self, msg):
+        frame = self.bridge.imgmsg_to_cv2(msg, 'bgr8')
+        t0 = time.perf_counter()
+        results = self.model.predict(frame, conf=0.45, verbose=False)
+        ms = (time.perf_counter() - t0) * 1000
+        annotated = results[0].plot()
+        self.get_logger().info(f'{len(results[0].boxes)} detections | {ms:.1f}ms')
+        self.pub.publish(self.bridge.cv2_to_imgmsg(annotated, 'bgr8'))
+
+rclpy.init()
+rclpy.spin(YoloNode())
+```
+
+To be able to measure performance and whatnot, we need to install ultralytics. To do so we first need to create a venv.
+```cmd
+apt update
+apt install -y python3-venv
+python3 -m venv /root/venv
+source /root/venv/bin/activate
+pip install ultralytics
+```
+
+This step will take most likely forever and is incredibly frustrating, as it downloads a lot of things that we do not care about :)
+
+3. Test out if the connection and drone control without the custom node first. For this, create a terminal in your project root, run
+```cmd
+docker exec -it px4_sitl bash
+cd /root/PX4-Autopilot
+make px4_sitl gz_x500 PX4_GZ_WORLD=baylands
+```
+4. In a second terminal, run:
+```cmd
+docker exec -it px4_sitl bash
+ros2 run ros_gz_bridge parameter_bridge
+/world/default/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo
+/world/default/model/x500_depth_0/link/camera_link/sensor/IMX214/image@sensor_msgs/msg/Image@gz.msgs.Image
+/depth_camera@sensor_msgs/msg/Image@gz.msgs.Image
+/depth_camera/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked
+--ros-args
+-r /world/default/model/x500_depth_0/link/camera_link/sensor/IMX214/camera_info:=/camera/color/camera_info
+-r /world/default/model/x500_depth_0/link/camera_link/sensor/IMX214/image:=/camera/color/image
+-r /depth_camera:=/camera/depth/image
+-r /depth_camera/points:=/camera/depth/points
+```
+5. In a third, run:
+```cmd
+docker exec -it px4_sitl bash
+ros2 launch mavros px4.launch fcu_url:=udp://:14540@localhost:14557
+```
+6. Go back to the first terminal and disable warnings using:
+```cmd
+param set COM_ARM_WO_GPS 1
+param set COM_RC_IN_MODE 4
+param set NAV_DLL_ACT 0
+param set NAV_RCL_ACT 0
+```
+7. Connect to drone over UDP by downloading: http://qgroundcontrol.com, and creating a new connection with the following parameters:
+```
+Name: PX4-Docker-Sim
+
+Type: UDP
+
+Listening Port: 15871 (You may need to change this to 14550)
+
+Target Hosts (Server): Click Add and enter 127.0.0.1:18570
+```
+
+8. Open http://localhost:6080/vnc_lite.html to watch the drone simulation
+9. Launch the drone by running both:
+```cmd
+commander arm
+commander takeoff
+```
+10. Land it using
+```cmd
+commander land
+```
+
+11. Video demonstrating the steps above:
+
+
+12. (Didnt work) run the same thing, but with our custom node in an extra terminal:
+```cmd
+docker exec -it px4_sitl bash
+python3 /root/yolo_ws/yolo_node.py
+```
+
+
+## Why it didnt work:
+
+Whenever I tried to use the node, I ran into performance issue where gazebo would crash. The framerate was terrible even when things worked. I was unable to capture a moment where it actually worked, even after lowering performance parameters and forcing the launch:
+<img width="599" height="189" alt="3" src="https://github.com/user-attachments/assets/1784e66b-4285-4519-b39c-a2bb0a82c450" />
+
+
+
 # PX4-Sim
 
 Fully containerized PX4 Autopilot simulation environment with browser-based GUI access.
