@@ -1,5 +1,5 @@
 # PX4 Autopilot with TigerVNC and NoVNC
-FROM erdemuysalx/ros2-jazzy-gazebo-harmonic:latest
+FROM domicmd/ros2-jazzy-gazebo-harmonic:latest
 
 # Metadata
 LABEL description="ROS 2 Jazzy with Gazebo Harmonic, PX4 Autopilot, MAVROS, and NoVNC"
