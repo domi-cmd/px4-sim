@@ -1,5 +1,7 @@
 # Exercise 9 Submission
 
+## Task 2 - Local Planner Node
+
 Link to repository: https://github.com/domi-cmd/px4-sim/
 
 For setting up the github project, docker and QGroundControll, refer to the step by step of Exercise 8 below.
