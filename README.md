@@ -4,6 +4,8 @@ Link to repository: https://github.com/domi-cmd/px4-sim/
 
 For setting up the github project, docker and QGroundControll, refer to the step by step of Exercise 8 below.
 
+The project environment is containerized. You can build the Docker image containing all dependencies and the local planner node using the provided Dockerfile.
+
 The code for the new node looks as follows:
 ```py
 #!/usr/bin/env python3
