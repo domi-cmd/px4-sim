@@ -1,4 +1,276 @@
-# Exercise Submission
+# Exercise 9 Submission
+
+Link to repository: https://github.com/domi-cmd/px4-sim/
+
+For setting up the github project, docker and QGroundControll, refer to the step by step of Exercise 8 below.
+
+The code for the new node looks as follows:
+```py
+#!/usr/bin/env python3
+import rclpy
+import numpy as np
+from rclpy.node import Node
+from geometry_msgs.msg import Twist, PoseStamped
+from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import String
+import sensor_msgs_py.point_cloud2 as pc2
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+
+# ── Tuning knobs ──────────────────────────────────────────
+K_ATT   = 1.2   # how strongly the drone is pulled toward the goal
+K_REP   = 3.0   # how strongly the drone is pushed away from obstacles
+D0      = 3.0   # metres — obstacles beyond this distance are ignored
+V_MAX   = 2.0   # maximum speed in m/s
+# ─────────────────────────────────────────────────────────
+
+class LocalPlannerNode(Node):
+
+    def __init__(self):
+        super().__init__('local_planner_node')
+
+        # Define a QoS profile that matches MAVROS and Camera sensors
+        sensor_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5
+        )
+
+        self.pose          = None
+        self.goal          = None
+        self.obstacle_pts  = None
+
+        # Apply sensor_qos to the position and camera subscribers
+        self.create_subscription(PoseStamped,
+            '/mavros/local_position/pose', self.pose_cb, sensor_qos)
+
+        self.create_subscription(PointCloud2,
+            '/camera/depth/points', self.cloud_cb, sensor_qos)
+
+        # Goal can stay at 10 (Reliable) as it's usually sent from a standard CLI
+        self.create_subscription(PoseStamped,
+            '/goal_pose', self.goal_cb, 10)
+
+        # Send velocity commands to the drone via MAVROS
+        self.vel_pub = self.create_publisher(Twist,
+            '/mavros/setpoint_velocity/cmd_vel_unstamped', 10)
+
+        # Run the planner at 20 Hz
+        self.create_timer(1.0 / 20.0, self.control_loop)
+
+        self.get_logger().info('Local planner node started')
+
+    # ── Callbacks ─────────────────────────────────────────
+
+    def pose_cb(self, msg):
+        self.pose = msg
+
+    def goal_cb(self, msg):
+        self.goal = msg
+        self.get_logger().info(
+            f'New goal received: x={msg.pose.position.x:.1f} '
+            f'y={msg.pose.position.y:.1f} z={msg.pose.position.z:.1f}')
+
+    def cloud_cb(self, msg):
+        # Convert the ROS point cloud message into a plain numpy array
+        pts = np.array(
+            [(p[0], p[1], p[2])
+             for p in pc2.read_points(msg, field_names=('x','y','z'), skip_nans=True)],
+            dtype=np.float32
+        )
+
+        if len(pts) == 0:
+            self.obstacle_pts = None
+            return
+
+        # Remove ground returns — ignore anything more than 1m below or 4m above the drone
+        pts = pts[(pts[:, 2] > -1.0) & (pts[:, 2] < 4.0)]
+
+        # Only keep points within the influence radius to save CPU
+        distances = np.linalg.norm(pts, axis=1)
+        pts = pts[distances < D0]
+
+        self.obstacle_pts = pts if len(pts) > 0 else None
+
+    # ── Main control loop ─────────────────────────────────
+
+    def control_loop(self):
+        # Do nothing until we have both a position fix and a goal
+        if self.pose is None or self.goal is None:
+            return
+
+        pos  = self._to_array(self.pose)
+        goal = self._to_array(self.goal)
+
+        # Stop if we're close enough to the goal
+        if np.linalg.norm(goal - pos) < 0.5:
+            self.get_logger().info('Goal reached!')
+            self.goal = None
+            self._stop()
+            return
+
+        # ── 1. Attractive force — pulls toward goal ────────
+        diff      = goal - pos
+        dist      = np.linalg.norm(diff)
+        f_att     = K_ATT * diff / dist * min(dist, 3.0)
+
+        # ── 2. Repulsive force — pushes away from obstacles ─
+        f_rep = np.zeros(3)
+        if self.obstacle_pts is not None:
+            for obs_point in self.obstacle_pts:
+                d = float(np.linalg.norm(obs_point))
+                d = max(d, 0.05)   # avoid division by zero
+                if d < D0:
+                    # direction pointing away from this obstacle point
+                    direction_away = -obs_point / d
+                    magnitude      = K_REP * (1.0/d - 1.0/D0) * (1.0/d**2)
+                    f_rep         += magnitude * direction_away
+
+        # ── 3. Combine and cap speed ───────────────────────
+        f_total = f_att + f_rep
+        speed   = np.linalg.norm(f_total)
+        if speed > V_MAX:
+            f_total = f_total / speed * V_MAX
+
+        self._publish_velocity(f_total)
+
+        self.get_logger().info(
+            f'dist={dist:.1f}m  '
+            f'f_att={np.linalg.norm(f_att):.2f}  '
+            f'f_rep={np.linalg.norm(f_rep):.2f}  '
+            f'vel={f_total.round(2)}')
+
+    # ── Helpers ───────────────────────────────────────────
+
+    def _to_array(self, pose_stamped):
+        p = pose_stamped.pose.position
+        return np.array([p.x, p.y, p.z])
+
+    def _publish_velocity(self, vel):
+        msg = Twist()
+        msg.linear.x = float(vel[0])
+        msg.linear.y = float(vel[1])
+        msg.linear.z = float(vel[2])
+        self.vel_pub.publish(msg)
+
+    def _stop(self):
+        self.vel_pub.publish(Twist())
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = LocalPlannerNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+```
+
+It relies on an Artificial Potential Field (APF), and uses a pulling force (k_att) which moves it towards the goal, as well as a repelling force (k_rep) which makes it avoid
+obstacles more agrgessively if needed.
+
+To push the node script to the docker container, place it in a folder at root (in my case, in planner_ws), name the file local_planner_node.py and run:
+```cmd
+docker exec -it px4_sitl bash
+root@338622ee7517:~# docker cp planner_ws/local_planner_node.py 338622ee7517:/root/planner_ws/local_planner_node.py
+Successfully copied 7.68kB to 338622ee7517:/root/planner_ws/local_planner_node.py
+```
+
+Verify that adding the script worked by running:
+```cmd
+
+verify node creation and addition to docker container:
+
+docker exec -it px4_sitl bash   
+root@338622ee7517:~# ls -l /root/planner_ws/local_planner_node.py
+-rwxr-xr-x 1 root root 5884 Apr 29 12:47 /root/planner_ws/local_planner_node.py
+```
+
+
+Now you just need to start the drone simulation! For this, open a terminal and run:
+```cmd
+docker exec -it px4_sitl bash
+root@338622ee7517:~# cd /root/PX4-Autopilot
+root@338622ee7517:~# make px4_sitl gz_x500_depth PX4_GZ_WORLD=baylands
+```
+
+In the same terminal, disable safety warnings:
+
+```cmd
+param set COM_ARM_WO_GPS 1
+param set COM_RC_IN_MODE 4
+param set NAV_DLL_ACT 0
+param set NAV_RCL_ACT 0
+```
+
+In a new terminal, open the ros-Gazebo bridge:
+```cmd
+docker exec -it px4_sitl bash
+ros2 run ros_gz_bridge parameter_bridge \
+  /depth_camera/points@sensor_msgs/msg/PointCloud2@gz.msgs.PointCloudPacked \
+  /world/baylands/model/x500_depth_0/link/camera_link/sensor/IMX214/image@sensor_msgs/msg/Image@gz.msgs.Image \
+  --ros-args \
+  -r /depth_camera/points:=/camera/depth/points
+```
+
+In a third terminal, start MAVROS:
+```cmd
+docker exec -it px4_sitl bash
+ros2 launch mavros px4.launch fcu_url:=udp://:14540@localhost:14557
+```
+
+Then start and connect to QGroundControl (see guide for Exercise 8 below)
+
+Once we connected to the drone in QGroundControl, in the first terminal were we loaded the baylands map, arm and start the drone 
+```cmd
+commander arm
+commander takeoff
+```
+
+You can now open your browser at localhost:6080, connect either to VCN or vcn_lite using the password: 1234, and see the drone.
+
+Now to run the pathing script for the drone, run the node script in a new terminal:
+```cmd
+docker exec -it px4_sitl bash   
+python3 /root/planner_ws/local_planner_node.py                                                      
+[INFO] [1777467855.654782191] [local_planner_node]: Local planner node started
+```
+
+
+To send the drone to a new target location/position, open a new terminal and run:
+```cmd
+docker exec -it px4_sitl bash
+ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+  '{header: {frame_id: "map"}, pose: {position: {x: 10.0, y: 0.0, z: 3.0}, orientation: {w: 1.0}}}'
+root@338622ee7517:~# ros2 topic pub --once /goal_pose geometry_msgs/msg/PoseStamped \
+  '{header: {frame_id: "map"}, pose: {position: {x: 10.0, y: 0.0, z: 3.0}, orientation: {w: 1.0}}}'
+Waiting for at least 1 matching subscription(s)...
+publisher: beginning loop
+publishing #1: geometry_msgs.msg.PoseStamped(header=std_msgs.msg.Header(stamp=builtin_interfaces.msg.Time(sec=0, nanosec=0), frame_id='map'), pose=geometry_msgs.msg.Pose(position=geometry_msgs.msg.Point(x=10.0, y=0.0, z=3.0), orientation=geometry_msgs.msg.Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)))
+```
+
+You should now see useful metrics in the terminal where you started the node script, such as the distance to the target, the x,y and z coordinates, the velocity and the attractive and repelling forces that make the drone avoid obstacles on the way to the destination.
+
+To actually make the drone move, you need to allow the script to take control of it. For this, run in a new terminal to change the drone to offboard mode:
+```cmd
+docker exec -it px4_sitl bash
+ros2 service call /mavros/cmd/arming mavros_msgs/srv/CommandBool "{value: True}"
+ros2 service call /mavros/set_mode mavros_msgs/srv/SetMode "{custom_mode: 'OFFBOARD'}"
+```
+
+And thats it! The drone should now move towards the given destination while avoiding obstacles. To get further insights such as the angular velocity, you can run (in again a new terminal):
+```cmd
+docker exec -it px4_sitl bash
+ros2 topic echo /mavros/setpoint_velocity/cmd_vel_unstamped
+```
+
+Below is a video of an incredibly low framerate drone (best my laptop can manage) moving towards the given destination, as well as relevant metrics as specified above:
+
+<img width="1803" height="915" alt="task_9" src="https://github.com/user-attachments/assets/c8672279-227e-43e7-ab28-c05468cdd4ce" />
+
+
+# Exercise 8 Submission
 
 Link to repository: https://github.com/domi-cmd/px4-sim/
 
